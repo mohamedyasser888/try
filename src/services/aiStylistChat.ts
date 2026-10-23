@@ -30,6 +30,7 @@ export interface ChatMessage {
     question: string;
     options: string[];
   };
+  feedback?: 'helpful' | 'not-helpful';
   timestamp: Date;
 }
 
