@@ -15,6 +15,7 @@ import { getCategoriesForGender } from '@/utils/constants';
 import { getErrorMessage } from '@/utils/errorHandling';
 import type { WardrobeItem, Category } from '@/types';
 import { getCategoryLabel } from '@/utils/categoryLabels';
+import { analyzeClothingForWardrobe } from '@/services/clothingAnalysis';
 
 interface OwnedTabProps {
   onShareToHome?: (item: WardrobeItem) => void;
@@ -45,6 +46,13 @@ export function OwnedTab({ onShareToHome }: OwnedTabProps) {
   const handleAddItem = async (formData: any) => {
     if (!profile) return;
 
+    let aiAttributes = null;
+    if (formData.imagePath) {
+      const analysis = await analyzeClothingForWardrobe(formData.imagePath, formData.name, formData.category);
+      aiAttributes = analysis.attributes;
+      if (analysis.warning) showToast(analysis.warning, 'warning');
+    }
+
     const { error } = await addItem({
       user_id: profile.id,
       name: formData.name,
@@ -52,7 +60,7 @@ export function OwnedTab({ onShareToHome }: OwnedTabProps) {
       category: formData.category,
       image_path: formData.imagePath,
       is_favourite: false,
-      ai_attributes: null,
+      ai_attributes: aiAttributes,
       rating: formData.rating || null,
     } as any);
 
@@ -73,6 +81,15 @@ export function OwnedTab({ onShareToHome }: OwnedTabProps) {
 
     if (formData.imagePath !== editingItem.image_path) {
       updates.image_path = formData.imagePath;
+      if (formData.imagePath) {
+        const analysis = await analyzeClothingForWardrobe(formData.imagePath, formData.name, formData.category);
+        updates.ai_attributes = analysis.attributes;
+        if (analysis.warning) showToast(analysis.warning, 'warning');
+      }
+    } else if (formData.name !== editingItem.name || formData.category !== editingItem.category) {
+      const analysis = await analyzeClothingForWardrobe(editingItem.image_path, formData.name, formData.category);
+      updates.ai_attributes = analysis.attributes;
+      if (analysis.warning) showToast(analysis.warning, 'warning');
     }
 
     const { error } = await updateItem(editingItem.id, updates);

@@ -167,6 +167,17 @@ export function StylistPage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
 
+  const saveFeedback = (messageIndex: number, feedback: 'helpful' | 'not-helpful') => {
+    setMessages(prev => prev.map((message, index) => index === messageIndex ? { ...message, feedback } : message));
+    try {
+      const stored = JSON.parse(localStorage.getItem('remy-stylist-feedback') || '[]') as Array<{ messageIndex: number; feedback: string; timestamp: string }>;
+      stored.push({ messageIndex, feedback, timestamp: new Date().toISOString() });
+      localStorage.setItem('remy-stylist-feedback', JSON.stringify(stored.slice(-100)));
+    } catch {
+      // Feedback must never interrupt the styling conversation.
+    }
+  };
+
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -342,6 +353,28 @@ export function StylistPage() {
                         </button>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {message.role === 'assistant' && index > 0 && (
+                  <div className="mt-3 flex items-center gap-2 text-[11px] text-neutral-500">
+                    <span>Was this useful?</span>
+                    <button
+                      type="button"
+                      aria-label="Mark stylist response helpful"
+                      onClick={() => saveFeedback(index, 'helpful')}
+                      className={`rounded-full px-2 py-1 transition ${message.feedback === 'helpful' ? 'bg-emerald-100 text-emerald-700' : 'bg-neutral-100 hover:bg-emerald-50 hover:text-emerald-700'}`}
+                    >
+                      Yes
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Mark stylist response not helpful"
+                      onClick={() => saveFeedback(index, 'not-helpful')}
+                      className={`rounded-full px-2 py-1 transition ${message.feedback === 'not-helpful' ? 'bg-rose-100 text-rose-700' : 'bg-neutral-100 hover:bg-rose-50 hover:text-rose-700'}`}
+                    >
+                      Not quite
+                    </button>
                   </div>
                 )}
                 

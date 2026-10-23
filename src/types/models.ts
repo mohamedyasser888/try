@@ -88,6 +88,13 @@ export interface AIAttributes {
   fit?: string;
   formality?: 'casual' | 'smart-casual' | 'formal' | string;
   description?: string;
+  is_clothing?: boolean;
+  category_match?: boolean;
+  image_quality?: 'clear' | 'acceptable' | 'poor' | string;
+  confidence?: number;
+  warnings?: string[];
+  analyzed_at?: string;
+  analysis_source?: string;
 }
 
 /**
