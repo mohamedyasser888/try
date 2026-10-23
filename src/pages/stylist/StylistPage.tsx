@@ -66,37 +66,27 @@ function OutfitPieceRail({ items }: { items: WardrobeItem[] }) {
 }
 
 function OutfitCarousel({ outfits }: { outfits: NonNullable<ChatMessage['outfitSuggestions']> }) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const [active, setActive] = useState(0);
-
-  const move = (direction: number) => {
-    trackRef.current?.scrollBy({ left: direction * (trackRef.current.clientWidth * 0.88), behavior: 'smooth' });
-  };
-
-  const updateActive = () => {
-    const track = trackRef.current;
-    if (!track) return;
-    setActive(Math.max(0, Math.min(outfits.length - 1, Math.round(track.scrollLeft / (track.clientWidth * 0.88)))));
-  };
+  const move = (direction: number) => { void direction; };
+  const active = 0;
 
   return (
     <div className="mt-4 -mx-1">
       <div className="flex items-center justify-between px-1 mb-2">
         <div>
           <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-primary-600">Curated looks</p>
-          <p className="text-xs text-neutral-500">Swipe to compare your best options</p>
+          <p className="text-xs text-neutral-500">Compare your best options</p>
         </div>
         {outfits.length > 1 && (
-          <div className="flex gap-1.5">
+          <div className="hidden flex gap-1.5">
             <button type="button" onClick={() => move(-1)} disabled={active === 0} aria-label="Previous outfit" className="h-8 w-8 rounded-full border border-neutral-200 bg-white text-neutral-600 shadow-sm transition hover:border-primary-300 hover:text-primary-600 disabled:opacity-30">‹</button>
             <button type="button" onClick={() => move(1)} disabled={active === outfits.length - 1} aria-label="Next outfit" className="h-8 w-8 rounded-full border border-neutral-200 bg-white text-neutral-600 shadow-sm transition hover:border-primary-300 hover:text-primary-600 disabled:opacity-30">›</button>
           </div>
         )}
       </div>
 
-      <div ref={trackRef} onScroll={updateActive} className="flex snap-x snap-mandatory gap-3 overflow-x-auto px-1 pb-3 scrollbar-hide">
+      <div className="grid gap-5 px-1 pb-3">
         {outfits.map((outfit, idx) => (
-          <div key={idx} style={{ animationDelay: `${idx * 140}ms` }} className="stylist-card-enter stylist-card-border min-w-[88%] snap-center overflow-hidden rounded-2xl bg-white/95 shadow-[0_18px_45px_rgba(86,55,100,0.12)] transition duration-300 hover:-translate-y-1 hover:shadow-[0_24px_55px_rgba(86,55,100,0.18)] sm:min-w-[520px]">
+          <div key={idx} style={{ animationDelay: `${idx * 140}ms` }} className="stylist-card-enter stylist-card-border w-full overflow-hidden rounded-2xl bg-white/95 shadow-[0_18px_45px_rgba(86,55,100,0.12)] transition duration-300 hover:-translate-y-1 hover:shadow-[0_24px_55px_rgba(86,55,100,0.18)]">
             <div className="flex items-center justify-between border-b border-neutral-100 px-4 py-3">
               <div className="flex items-center gap-2">
                 <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold ${idx === 0 ? 'bg-primary-500 text-white' : 'bg-primary-100 text-primary-700'}`}>{idx + 1}</span>
@@ -137,7 +127,7 @@ function OutfitCarousel({ outfits }: { outfits: NonNullable<ChatMessage['outfitS
       </div>
 
       {outfits.length > 1 && (
-        <div className="flex justify-center gap-1.5 pt-1">
+        <div className="hidden flex justify-center gap-1.5 pt-1">
           {outfits.map((_, idx) => <span key={idx} className={`h-1.5 rounded-full transition-all ${idx === active ? 'w-5 bg-primary-500' : 'w-1.5 bg-neutral-300'}`} />)}
         </div>
       )}

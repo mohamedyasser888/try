@@ -173,37 +173,43 @@ function itemSearchText(item: WardrobeItem): string {
   return `${item.name} ${item.category} ${JSON.stringify(item.ai_attributes || {})}`.toLowerCase();
 }
 
-function itemSeasons(item: WardrobeItem): string[] {
-  const attributes = item.ai_attributes || {};
-  const seasons = Array.isArray(attributes.season) ? attributes.season : [];
-  return seasons.map(season => season.toLowerCase());
-}
-
 function isTooWarmForSummer(item: WardrobeItem): boolean {
   const text = itemSearchText(item);
   const attributes = item.ai_attributes || {};
-  return /hoodie|sweatshirt|fleece|puffer|parka|heavy coat|winter coat|thermal|thick knit|wool coat/i.test(text) ||
-    attributes.weight === 'heavy' || attributes.warmth === 'warm';
+  return /hoodie|hooded sweatshirt|sweatshirt|sweat shirt|switsh irt|switsh?irt|switchirt|swichirt|fleece|puffer|parka|heavy coat|winter coat|thermal|thick knit|knitwear|sweater|cardigan|wool coat/i.test(text) ||
+    attributes.weight === 'heavy';
+}
+
+function isTshirt(item: WardrobeItem): boolean {
+  return /(^|\b)(t-shirt|tshirt|tee|short sleeve|short-sleeve)(\b|$)/i.test(itemSearchText(item));
+}
+
+function isWarmLayer(item: WardrobeItem): boolean {
+  return getSlot(item) === 'jacket' || /coat|blazer|jacket|parka|puffer|wool|fleece|thick knit|heavy sweater|hoodie|sweatshirt/i.test(itemSearchText(item));
 }
 
 function isTooLightForWinter(item: WardrobeItem): boolean {
   const text = itemSearchText(item);
   const attributes = item.ai_attributes || {};
-  return /swimwear|bikini|tank top|vest top|shorts|sandals|beachwear/i.test(text) ||
+  if (isTshirt(item)) return false; // A T-shirt is allowed only when layered with a warm jacket.
+  return /swimwear|bikini|tank top|vest top|shorts|sandals|beachwear|summer dress/i.test(text) ||
     attributes.weight === 'light' && attributes.warmth === 'cool';
 }
 
 function isSeasonCompatible(item: WardrobeItem, request: string): boolean {
   const season = requestedSeason(request);
   if (!season) return true;
-  const seasons = itemSeasons(item);
   if (season === 'summer') {
-    return !isTooWarmForSummer(item) && (!seasons.length || seasons.includes('summer') || seasons.includes('spring') || seasons.includes('all-season'));
+    // Do not reject a physically suitable item because vision assigned the
+    // wrong season label. Explicitly warm/heavy garment evidence wins.
+    return !isTooWarmForSummer(item);
   }
   if (season === 'winter') {
-    return !isTooLightForWinter(item) && (!seasons.length || seasons.includes('winter') || seasons.includes('autumn') || seasons.includes('all-season'));
+    return !isTooLightForWinter(item);
   }
-  return !seasons.length || seasons.includes(season) || seasons.includes('all-season');
+  if (season === 'spring') return !isTooWarmForSummer(item);
+  if (season === 'autumn') return !isTooLightForWinter(item);
+  return true;
 }
 
 function seasonEligibleItems(items: WardrobeItem[], request: string): WardrobeItem[] {
@@ -276,10 +282,13 @@ function pairCompatibility(first: WardrobeItem, second: WardrobeItem, request: s
 }
 
 function compatibilityFor(items: WardrobeItem[], request: string): { overallScore: number; compatibility: PairCompatibility[] } {
+  // Accessories and bags are evaluated separately. They must not lower the
+  // score of the actual clothing combination that determines the outfit.
+  const outfitItems = items.filter(item => !['accessories', 'bag'].includes(getSlot(item)));
   const pairs: PairCompatibility[] = [];
-  for (let first = 0; first < items.length; first += 1) {
-    for (let second = first + 1; second < items.length; second += 1) {
-      pairs.push(pairCompatibility(items[first], items[second], request));
+  for (let first = 0; first < outfitItems.length; first += 1) {
+    for (let second = first + 1; second < outfitItems.length; second += 1) {
+      pairs.push(pairCompatibility(outfitItems[first], outfitItems[second], request));
     }
   }
   const overallScore = pairs.length ? Math.round(pairs.reduce((sum, pair) => sum + pair.score, 0) / pairs.length) : 100;
@@ -291,6 +300,8 @@ export function scoreOutfitCompatibility(items: WardrobeItem[], request: string)
 }
 
 function outfitQuality(items: WardrobeItem[], request: string): { ok: boolean; reason: string } {
+  const seasonalReason = seasonRestrictionReason(items, request);
+  if (seasonalReason) return { ok: false, reason: seasonalReason };
   const scores = compatibilityFor(items, request);
   const corePairs = scores.compatibility.filter(pair => {
     const first = items.find(item => item.id === pair.firstItemId);
@@ -307,6 +318,26 @@ function outfitQuality(items: WardrobeItem[], request: string): { ok: boolean; r
   return { ok: true, reason: '' };
 }
 
+function seasonRestrictionReason(items: WardrobeItem[], request: string): string | null {
+  const season = requestedSeason(request);
+  if (!season) return null;
+  const invalid = items.find(item => !isSeasonCompatible(item, request));
+  if (invalid) {
+    return `${invalid.name} is not suitable for ${season}; it was excluded instead of being forced into the outfit.`;
+  }
+  if (season === 'winter') {
+    const hasTshirt = items.some(isTshirt);
+    const hasLayer = items.some(isWarmLayer);
+    if (hasTshirt && !hasLayer) return 'A T-shirt cannot be used alone for winter. Add a jacket or coat over it.';
+    if (!hasLayer && items.some(item => getSlot(item) === 'top')) return 'This winter look needs a warm layer such as a jacket, coat, sweater, or hoodie.';
+  }
+  if (season === 'summer' && items.some(isTooWarmForSummer)) {
+    const warmItem = items.find(isTooWarmForSummer);
+    return `${warmItem?.name || 'This piece'} is too warm for summer. Sweatshirts, hoodies, fleece, heavy knitwear, and winter coats are not allowed.`;
+  }
+  return null;
+}
+
 function wardrobeLimitations(items: WardrobeItem[], request: string): string {
   const slots = new Set(seasonEligibleItems(items, request).map(getSlot));
   const missing: string[] = [];
@@ -317,7 +348,8 @@ function wardrobeLimitations(items: WardrobeItem[], request: string): string {
   const dataNote = incomplete.length
     ? ` Color information is incomplete for ${incomplete.join(', ')}, so the confidence score is limited.`
     : '';
-  return `${missing.length ? `The wardrobe is missing ${missing.join(', ')}.` : 'The wardrobe has the basic clothing slots, but no pair passed the compatibility check.'}${dataNote}${topBottomCompatibilityReport(items, request)}`;
+  const seasonalReason = seasonRestrictionReason(items.filter(item => getSlot(item) !== 'accessories' && getSlot(item) !== 'bag'), request);
+  return `${missing.length ? `The wardrobe is missing ${missing.join(', ')}.` : 'The wardrobe has the basic clothing slots, but no pair passed the compatibility check.'}${seasonalReason ? ` ${seasonalReason}` : ''}${dataNote}${topBottomCompatibilityReport(items, request)}`;
 }
 
 function topBottomCompatibilityReport(items: WardrobeItem[], request: string): string {
@@ -355,6 +387,7 @@ function fitsRequestedOccasion(items: WardrobeItem[], request: string): boolean 
 }
 
 function fitsRequestedSeason(items: WardrobeItem[], request: string): boolean {
+  if (requestedSeason(request) === 'summer' && items.some(isTooWarmForSummer)) return false;
   return items.every(item => isSeasonCompatible(item, request));
 }
 
@@ -384,10 +417,16 @@ function requestAwareScore(item: WardrobeItem, request: string): number {
 function outfitDecisionScore(items: WardrobeItem[], request: string): number {
   const slots = new Set(items.map(getSlot));
   let score = items.reduce((total, item) => total + requestAwareScore(item, request), 0);
-  if (slots.has('dress') || (slots.has('top') && slots.has('bottom'))) score += 8;
+  if (slots.has('dress')) score += 20;
+  if (slots.has('top') && slots.has('bottom')) {
+    score += 20;
+    const top = items.find(item => getSlot(item) === 'top');
+    const bottom = items.find(item => getSlot(item) === 'bottom');
+    if (top && bottom) score += pairCompatibility(top, bottom, request).score / 4;
+  }
   if (slots.has('shoes')) score += 4;
   if (isFormalRequest(request) && slots.has('jacket')) score += 3;
-  score += Math.round(compatibilityFor(items, request).overallScore / 10);
+  score += Math.round(compatibilityFor(items, request).overallScore / 5);
   return score;
 }
 
@@ -434,6 +473,56 @@ function addCorePairRecommendation(response: ChatResponse, items: WardrobeItem[]
   };
 }
 
+function expandWithStrongAlternatives(response: ChatResponse, items: WardrobeItem[], request: string): ChatResponse {
+  const existing = response.outfitSuggestions || [];
+  if (!existing.length) return response;
+
+  const tops = items.filter(item => getSlot(item) === 'top' && isSeasonCompatible(item, request));
+  const bottoms = items.filter(item => getSlot(item) === 'bottom' && isSeasonCompatible(item, request));
+  const candidates = tops.flatMap(top => bottoms.map(bottom => {
+    const pair = pairCompatibility(top, bottom, request);
+    return { top, bottom, pair, score: pair.score + requestAwareScore(top, request) + requestAwareScore(bottom, request) };
+  }))
+    .filter(candidate => candidate.pair.score >= 55)
+    .sort((a, b) => b.score - a.score);
+
+  const hasCorePair = (outfit: OutfitSuggestion, top: WardrobeItem, bottom: WardrobeItem) =>
+    outfit.items.some(item => item.id === top.id) && outfit.items.some(item => item.id === bottom.id);
+  const additions: OutfitSuggestion[] = [];
+  for (const candidate of candidates) {
+    if (existing.some(outfit => hasCorePair(outfit, candidate.top, candidate.bottom)) ||
+        additions.some(outfit => hasCorePair(outfit, candidate.top, candidate.bottom))) continue;
+
+    const core = [candidate.top, candidate.bottom];
+    const quality = outfitQuality(core, request);
+    if (!quality.ok) continue;
+    additions.push(makeOutfitSuggestion(
+      core,
+      `Alternative ${requestedSeason(request) || 'everyday'} pairing: ${candidate.top.name} with ${candidate.bottom.name}. ${candidate.pair.reason}`,
+      request,
+    ));
+    if (existing.length + additions.length >= 3) break;
+  }
+
+  if (!additions.length) return response;
+  return {
+    ...response,
+    message: `${response.message}\n\nI also compared the other compatible combinations in your wardrobe and added the strongest alternatives.`,
+    outfitSuggestions: [...existing, ...additions],
+  };
+}
+
+function keepBestOutfit(response: ChatResponse, request: string): ChatResponse {
+  if (!response.outfitSuggestions?.length) return response;
+  const best = [...response.outfitSuggestions]
+    .sort((a, b) => outfitDecisionScore(b.items, request) - outfitDecisionScore(a.items, request))[0];
+  return {
+    ...response,
+    message: `${response.message}\n\nBest match: ${best.items.map(item => item.name).join(' + ')}. ${best.reason}`,
+    outfitSuggestions: [best],
+  };
+}
+
 // ─── Convert image URL to base64 ─────────────────────────────────────────────
 
 async function toBase64(imagePath: string): Promise<{ data: string; mime: string } | null> {
@@ -473,7 +562,7 @@ async function describeWithGroq(item: WardrobeItem): Promise<string | null> {
           content: [
             {
               type: 'text',
-              text: 'Describe this clothing item in ONE sentence (max 15 words). Include: color, pattern, garment type. Only output the sentence.'
+              text: 'Inspect the image itself and describe the visible garment silhouette in ONE sentence (max 20 words). Include color, pattern, sleeve length, structure, and exact garment type (for example T-shirt, sweatshirt, blouse, jacket, trousers). Ignore the item name and declared category if they disagree. Only output the sentence.'
             },
             {
               type: 'image_url',
@@ -514,21 +603,23 @@ async function buildMasterOutfitsWithGemini(
   if (!usableImages.length) return null;
 
   const wardrobeIndex = wardrobeItems.map(item =>
-    `[${item.id}] name="${item.name}" declared_category="${item.category}" size="${item.size}" attributes=${JSON.stringify(item.ai_attributes || {})}`
+    `[${item.id}] name="${item.name}" declared_category="${item.category}" attributes=${JSON.stringify(item.ai_attributes || {})}`
   ).join('\n');
   const prompt = `You are a world-class personal fashion director and wardrobe editor.
 The user asks: "${userRequest}"
 Inspect every wardrobe image below. The text index is authoritative for IDs:
 ${wardrobeIndex}
 
-Create exactly THREE distinct, high-quality outfits from the user's actual wardrobe. Analyze color harmony, patterns, fabric, silhouette, proportions, layering, footwear, accessories, season, occasion, and the user's request.
-Hard season rule: for summer, hot weather, beach, or صيف, never select hoodies, sweatshirts, fleece, puffer jackets, thermal clothing, thick knitwear, wool coats, or other heavy warm pieces. For winter, do not select swimwear, beachwear, or clearly lightweight summer-only pieces. If the wardrobe cannot make a valid outfit for the requested season, return no outfits and explain exactly what is missing.
-Rules: use only indexed IDs; never invent clothing; each look needs a dress OR at least a top and bottom; add optional pieces only when they improve the look; make all three looks meaningfully different; obey any requested color, garment, occasion, or season; rank 1 strongest, 2 best alternative, 3 most creative wearable option. Formal decision rule: when the request includes formal, office, business, interview, wedding, elegant, dressy, or professional, prioritize chemise/shirts, blazers, tailored trousers or skirts, dresses, loafers, heels, or dress shoes. Reject sweatshirts, hoodies, T-shirts, joggers, sportswear, and sneakers unless the user explicitly asks for them. Do not call a sweatshirt formal just because its color matches. Casual decision rule: when the request includes casual, relaxed, everyday, or weekend, prefer jeans/denim, sweatpants, joggers, casual sneakers, hoodies, and relaxed tops over classic trousers, tailored pants, dress shoes, or blazers.
+Create up to THREE distinct, high-quality outfits from the user's actual wardrobe. If the wardrobe supports multiple genuinely different style approaches within the request, provide those approaches (for example, for "summer outfit": relaxed casual, polished/elegant, and sporty/trendy). If only one style is genuinely possible with the available items, provide only the single strongest outfit; never force duplicate or weak variations. Label each outfit with its style direction in the title and make the item combinations meaningfully different. Analyze color harmony, patterns, fabric, silhouette, proportions, layering, footwear, accessories, season, occasion, and the user's request.
+Hard season rule: for summer, hot weather, beach, or صيف, never select hoodies, sweatshirts, fleece, puffer jackets, thermal clothing, thick knitwear, wool coats, heavy coats, or other warm winter pieces. For winter, never use swimwear, beachwear, shorts, sandals, tank tops, or clearly summer-only pieces. A T-shirt is forbidden as a standalone winter top; it is allowed only when a jacket or coat is included in the same outfit. Winter outfits must include a warm layer when the base top is lightweight. For spring, reject heavy winter-only pieces unless the user asks for layering. For autumn, reject summer-only pieces and favor a layer when the base is lightweight. If the wardrobe cannot make a valid outfit for the requested season, return no outfits and explain exactly which rule blocked the available items and what is missing.
+Rules: use only indexed IDs; never invent clothing; each look needs a dress OR at least a top and bottom; add optional pieces only when they improve the look; make every returned look meaningfully different in both styling direction and item combination; obey any requested color, garment, occasion, or season; rank the strongest look first. If the request names one season or occasion, vary the style within that constraint only when the wardrobe supports it; otherwise return one strong look. Formal decision rule: when the request includes formal, office, business, interview, wedding, elegant, dressy, or professional, prioritize chemise/shirts, blazers, tailored trousers or skirts, dresses, loafers, heels, or dress shoes. Reject sweatshirts, hoodies, T-shirts, joggers, sportswear, and sneakers unless the user explicitly asks for them. Do not call a sweatshirt formal just because its color matches. Casual decision rule: when the request includes casual, relaxed, everyday, or weekend, prefer jeans/denim, sweatpants, joggers, casual sneakers, hoodies, and relaxed tops over classic trousers, tailored pants, dress shoes, or blazers.
 Category safety: compare every image with its declared category. If an image is trousers/pants but declared as Accessories, it is invalid and must not be used at all. If an image is clothing but declared as Bags, it is invalid and must not be used at all. Do not reinterpret a mismatched item as an accessory. Add the ID to invalid_item_ids and explain the mismatch in alerts. Only use category-compatible items in outfits.
 Evaluate every valid item declared as Accessories or Bags separately. Rings, belts, scarves, bags, and similar pieces must appear in accessory_notes even when not needed in the core outfit. Give each a realistic 0-100 fit_score, verdict, and reason. Never omit a valid accessory without evaluating it.
 Return ONLY valid JSON: {"intro":"one short expert overview","alerts":["category mismatch warnings, or []"],"invalid_item_ids":["IDs of visually mismatched items, or []"],"accessory_notes":[{"item_id":"id","fit_score":50,"verdict":"Works as a subtle accent","reason":"..."}],"outfits":[{"title":"...","item_ids":["id"],"reason":"2 concise sentences explaining the styling logic","missing":["optional missing slot"]},{"title":"...","item_ids":["id"],"reason":"...","missing":[]},{"title":"...","item_ids":["id"],"reason":"...","missing":[]}]}`;
 
-  const parts: Array<Record<string, unknown>> = [{ text: prompt }];
+  const finalPrompt = `${prompt}\n\nFINAL OUTPUT RULE: Return up to three outfits, not necessarily three. Return multiple only when the wardrobe supports genuinely different styles; if only one strong style is possible, return one outfit and do not create weak duplicates. Never invent or mention prices. Do not discuss item sizes unless the user explicitly asks about sizing.`;
+  const finalPromptWithVisionRules = `${finalPrompt} IMAGE-FIRST RULE: Identify each garment from its visible shape before using its name, category, or metadata. A visibly thick sweatshirt, hoodie, sweater, fleece, or winter layer is never valid for a summer outfit. If the name says T-shirt but the image is a sweatshirt, trust the image and exclude it for summer.`;
+  const parts: Array<Record<string, unknown>> = [{ text: finalPromptWithVisionRules }];
   for (const { item, image } of usableImages) {
     parts.push({ text: `Image for wardrobe item ID ${item.id} (${item.name}).` });
     parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
@@ -647,7 +738,7 @@ async function describeWithGemini(item: WardrobeItem): Promise<string | null> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [
-          { text: 'Describe this clothing item in ONE sentence (max 15 words). Include: color, pattern, garment type. Only output the sentence.' },
+          { text: 'Inspect the image itself and describe the visible garment silhouette in ONE sentence (max 20 words). Include color, pattern, sleeve length, structure, and exact garment type (for example T-shirt, sweatshirt, blouse, jacket, trousers). Ignore the item name and declared category if they disagree. Only output the sentence.' },
           { inline_data: { mime_type: img.mime, data: img.data } }
         ]}],
         generationConfig: { temperature: 0.1, maxOutputTokens: 60 }
@@ -840,6 +931,7 @@ function addHints(
 }
 
 function buildOutfitPrompt(request: string, itemList: string, _forced?: Record<string, string>): string {
+  void _forced;
   return `You are an expert fashion stylist with deep knowledge of color theory, style matching, and occasion dressing.
 
 The user wants: "${request}"
@@ -916,6 +1008,7 @@ export async function chatWithStylist(
   wardrobeItems: WardrobeItem[],
   _history: ChatMessage[]
 ): Promise<ChatResponse> {
+  void _history;
   console.log('\n=== AI Stylist ===');
   console.log('Request:', userMessage);
   console.log('Wardrobe items:', wardrobeItems.length);
@@ -952,13 +1045,13 @@ export async function chatWithStylist(
 
   const secureResult = await requestSecureStylist(userMessage, requestableItems);
   if (secureResult) {
-    const enriched = addCorePairRecommendation(secureResult, requestableItems, userMessage);
+    const enriched = keepBestOutfit(expandWithStrongAlternatives(addCorePairRecommendation(secureResult, requestableItems, userMessage), requestableItems, userMessage), userMessage);
     return localAlerts.length ? { ...enriched, message: `${enriched.message}\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(enriched.alerts || []), ...localAlerts] } : enriched;
   }
 
   const masterResult = await buildMasterOutfitsWithGemini(userMessage, requestableItems);
   if (masterResult) {
-    const enriched = addCorePairRecommendation(masterResult, requestableItems, userMessage);
+    const enriched = keepBestOutfit(expandWithStrongAlternatives(addCorePairRecommendation(masterResult, requestableItems, userMessage), requestableItems, userMessage), userMessage);
     return localAlerts.length ? { ...enriched, message: `${enriched.message}\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(enriched.alerts || []), ...localAlerts] } : enriched;
   }
 
@@ -1030,11 +1123,11 @@ export async function chatWithStylist(
     ? `\n\n⚠️ **Not in your wardrobe:** ${result.missing.map(s => `${slotEmoji[s] || ''}${s}`).join(', ')}\nConsider adding these for a complete look!`
     : '\n\n✅ Your wardrobe has everything for this outfit!';
 
-  return {
+  return keepBestOutfit(expandWithStrongAlternatives({
     message: `${result.message}\n\n${itemLines}${missingNote}`,
     outfitSuggestions: [makeOutfitSuggestion(pickedItems, result.message, userMessage)],
     alerts: localAlerts.length ? localAlerts : undefined,
-  };
+  }, requestableItems, userMessage), userMessage);
 }
 
 // ─── Rule-based fallback when both AIs fail ───────────────────────────────────
@@ -1045,10 +1138,17 @@ function ruleFallback(
   _forced?: Record<string, string>,
   _described?: { id: string; slot: string; name: string; desc: string }[]
 ): ChatResponse {
+  void _forced;
   const req = request.toLowerCase();
+  const visuallyWarmIds = requestedSeason(request) === 'summer'
+    ? new Set((_described || [])
+      .filter(item => /sweatshirt|sweat shirt|switshirt|switchirt|swichirt|hoodie|sweater|fleece|puffer|thick knit|winter coat|heavy coat/i.test(item.desc))
+      .map(item => item.id))
+    : new Set<string>();
+  const usableItems = items.filter(item => !visuallyWarmIds.has(item.id));
 
   const bySlot: Record<string, WardrobeItem[]> = {};
-  for (const item of items) {
+  for (const item of usableItems) {
     const s = getSlot(item);
     if (!bySlot[s]) bySlot[s] = [];
     bySlot[s].push(item);
@@ -1102,8 +1202,8 @@ function ruleFallback(
     ? `\n\n⚠️ **Not in your wardrobe:** ${missing.join(', ')} — consider adding these!`
     : '';
 
-  return {
+  return keepBestOutfit(expandWithStrongAlternatives({
     message: `I found the strongest color-safe look available in your wardrobe. 👗✨\n\n${itemLines}${missingNote}${occasionNote}\n\nWhy this works: the pieces were selected as a pair, then checked for color harmony, season, occasion, and category compatibility.`,
     outfitSuggestions: [makeOutfitSuggestion(picked, `${occasionNote}The pieces were selected together rather than independently, with color harmony and the requested context checked first.`, request)]
-  };
+  }, usableItems, request), request);
 }
