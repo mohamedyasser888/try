@@ -75,11 +75,19 @@ export interface Profile {
  */
 export interface AIAttributes {
   color?: string;
+  colors?: string[];
+  garment_type?: string;
   style?: string;
   occasion?: string[];
   season?: string[];
   pattern?: string;
   material?: string;
+  fabric?: string;
+  weight?: 'light' | 'medium' | 'heavy' | string;
+  warmth?: 'cool' | 'medium' | 'warm' | string;
+  fit?: string;
+  formality?: 'casual' | 'smart-casual' | 'formal' | string;
+  description?: string;
 }
 
 /**

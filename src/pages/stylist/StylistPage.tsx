@@ -15,7 +15,7 @@ import { useT } from '@/i18n';
 import { useWardrobe, useFavouriteItems } from '@/hooks/useWardrobe';
 import { useLikedPosts } from '@/hooks/usePosts';
 import { useToast } from '@/hooks/useToast';
-import { chatWithStylist, type ChatMessage } from '@/services/aiStylistChat';
+import { chatWithStylist, scoreOutfitCompatibility, type ChatMessage } from '@/services/aiStylistChat';
 import type { WardrobeItem } from '@/types/models';
 
 function cleanStylistText(text: string): string {
@@ -109,6 +109,25 @@ function OutfitCarousel({ outfits }: { outfits: NonNullable<ChatMessage['outfitS
             </div>
 
             <OutfitPieceRail items={outfit.items} />
+
+            {outfit.overallScore !== undefined && (
+              <div className="border-t border-neutral-100 bg-primary-50/50 px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-bold uppercase tracking-[0.12em] text-primary-700">Style compatibility</p>
+                  <span className="rounded-full bg-primary-500 px-2.5 py-1 text-xs font-bold text-white">{outfit.overallScore}%</span>
+                </div>
+                {outfit.compatibility && outfit.compatibility.length > 0 && (
+                  <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+                    {outfit.compatibility.map(pair => (
+                      <div key={`${pair.firstItemId}-${pair.secondItemId}`} className="flex items-center justify-between gap-2 rounded-lg bg-white/80 px-2.5 py-2 text-[11px] text-neutral-600">
+                        <span className="min-w-0 truncate" title={`${pair.firstItemName} + ${pair.secondItemName}`}>{pair.firstItemName} + {pair.secondItemName}</span>
+                        <span className="shrink-0 font-bold text-primary-700">{pair.score}%</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="border-t border-neutral-100 px-4 py-3">
               <p className="text-xs leading-relaxed text-neutral-600">{cleanStylistText(outfit.reason)}</p>
@@ -228,7 +247,10 @@ export function StylistPage() {
         : '';
       const accessorySuggestions = response.outfitSuggestions && response.outfitSuggestions.length > 0 && unshownAccessories.length > 0
         ? response.outfitSuggestions.map((outfit, index) => index === 0
-          ? { ...outfit, items: [...outfit.items, ...unshownAccessories], reason: `${outfit.reason}\nFinishing pieces: ${unshownAccessories.map(item => item.name).join(', ')}.` }
+          ? (() => {
+              const items = [...outfit.items, ...unshownAccessories];
+              return { ...outfit, items, ...scoreOutfitCompatibility(items, userInput), reason: `${outfit.reason}\nFinishing pieces: ${unshownAccessories.map(item => item.name).join(', ')}.` };
+            })()
           : outfit)
         : response.outfitSuggestions;
 
@@ -237,6 +259,7 @@ export function StylistPage() {
         role: 'assistant',
         content: `${response.message || 'Sorry, I could not process that request.'}${accessoryMessage}`,
         outfitSuggestions: accessorySuggestions,
+        clarification: response.clarification,
         timestamp: new Date()
       }));
 
@@ -301,6 +324,25 @@ export function StylistPage() {
                 
                 {message.outfitSuggestions && message.outfitSuggestions.length > 0 && (
                   <OutfitCarousel outfits={message.outfitSuggestions} />
+                )}
+
+                {message.clarification && (
+                  <div className="mt-4 rounded-xl border border-primary-100 bg-primary-50/70 p-3">
+                    <p className="text-xs font-semibold text-primary-800">{message.clarification.question}</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {message.clarification.options.map(option => (
+                        <button
+                          key={option}
+                          type="button"
+                          onClick={() => setInput(option)}
+                          disabled={loading}
+                          className="rounded-full border border-primary-200 bg-white px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:border-primary-400 hover:bg-primary-100 disabled:opacity-50"
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 )}
                 
                 <p className="text-xs opacity-60 mt-2">

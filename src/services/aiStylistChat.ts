@@ -26,11 +26,26 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   outfitSuggestions?: OutfitSuggestion[];
+  clarification?: {
+    question: string;
+    options: string[];
+  };
   timestamp: Date;
 }
 
 export interface OutfitSuggestion {
   items: WardrobeItem[];
+  reason: string;
+  overallScore?: number;
+  compatibility?: PairCompatibility[];
+}
+
+export interface PairCompatibility {
+  firstItemId: string;
+  secondItemId: string;
+  firstItemName: string;
+  secondItemName: string;
+  score: number;
   reason: string;
 }
 
@@ -38,6 +53,10 @@ export interface ChatResponse {
   message: string;
   outfitSuggestions?: OutfitSuggestion[];
   alerts?: string[];
+  clarification?: {
+    question: string;
+    options: string[];
+  };
   error?: Error;
 }
 
@@ -79,22 +98,186 @@ function obviousCategoryMismatch(item: WardrobeItem): string | null {
   const category = item.category.toLowerCase();
   const name = item.name.toLowerCase();
   const garmentWords = ['pantalon', 'pants', 'trouser', 'jean', 'jeans', 'skirt', 'shorts', 'legging', 'leggings'];
+  const shoeWords = ['shoe', 'shoes', 'sneaker', 'sneakers', 'trainer', 'trainers', 'boot', 'boots', 'heel', 'heels', 'loafer', 'sandals', 'sandal', 'slipper'];
+  const sockWords = ['sock', 'socks', 'hosiery'];
   const looksLikeGarment = garmentWords.some(word => name.includes(word));
+  const looksLikeShoe = shoeWords.some(word => name.includes(word));
+  const looksLikeSock = sockWords.some(word => name.includes(word));
   if (category === 'accessories' && looksLikeGarment) {
-    return `${item.name} appears to be clothing, not an accessory. Please recategorize it.`;
+    return `Warning: ${item.name} appears to be clothing, not an accessory. Remove it or recategorize it immediately.`;
   }
   if (category === 'bags' && looksLikeGarment) {
-    return `${item.name} appears to be clothing, not a bag. Please recategorize it.`;
+    return `Warning: ${item.name} appears to be clothing, not a bag. Remove it or recategorize it immediately.`;
+  }
+  if (category === 'socks' && looksLikeShoe) {
+    return `Warning: ${item.name} appears to be shoes but is categorized as Socks. Remove it or recategorize it immediately.`;
+  }
+  if (category === 'shoes' && looksLikeSock) {
+    return `Warning: ${item.name} appears to be socks but is categorized as Shoes. Remove it or recategorize it immediately.`;
   }
   return null;
+}
+
+function asksForHijab(request: string): boolean {
+  return /hijab|heads*scarf|headscarf|حجاب/i.test(request);
+}
+
+function needsClarification(request: string): boolean {
+  const normalized = request.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const hasUsefulIntent = /\b(top|shirt|t-shirt|blouse|sweater|hoodie|dress|skirt|pants?|jeans?|trousers?|shorts?|jacket|coat|blazer|shoes?|sneakers?|boots?|sandals?|socks?|hijab|headscarf|bag|accessor(?:y|ies)|outfit|look|wear|match|style|colour|color|summer|winter|spring|autumn|fall|hot|cold|rain|work|office|party|formal|casual|sport|date|wedding|travel|beach|صيف|شتاء|ربيع|خريف|حجاب)\b/i.test(normalized);
+  if (hasUsefulIntent) return false;
+
+  return /^(help|hi|hello|hey|advice|suggest|suggestion|what should i wear|choose for me|style me|i need help|anything|surprise me)[!.?\s]*$/i.test(normalized);
+}
+
+function clarificationResponse(): ChatResponse {
+  return {
+    message: 'I can build a much better look if you give me one detail first. What are you dressing for?',
+    clarification: {
+      question: 'Choose an occasion or direction:',
+      options: ['Everyday casual', 'Work or office', 'Party or date', 'Summer weather', 'Formal event']
+    }
+  };
+}
+
+function isHijab(item: WardrobeItem): boolean {
+  return /hijab|heads*scarf|headscarf|حجاب/i.test(`${item.name} ${item.category}`);
+}
+
+function requiredItemResponse(request: string, items: WardrobeItem[]): ChatResponse | null {
+  if (!asksForHijab(request) || items.some(isHijab)) return null;
+  return {
+    message: `I cannot complete this request because you do not have a Hijab in your wardrobe. Please add or categorize a Hijab item first, then I can build the outfit around it.`,
+    alerts: ['The requested item is missing: Hijab.']
+  };
 }
 
 function isFormalRequest(request: string): boolean {
   return /formal|formel|office|work|business|interview|wedding|ceremony|ceremonial|elegant|dressy|professional|meeting|black tie|smart dress/i.test(request);
 }
 
+type RequestedSeason = 'summer' | 'winter' | 'spring' | 'autumn' | null;
+
+function requestedSeason(request: string): RequestedSeason {
+  if (/summer|hot weather|hot day|beach|pool|صيف/i.test(request)) return 'summer';
+  if (/winter|cold weather|cold day|snow|شتاء/i.test(request)) return 'winter';
+  if (/spring|ربيع/i.test(request)) return 'spring';
+  if (/autumn|fall|خريف/i.test(request)) return 'autumn';
+  return null;
+}
+
 function itemSearchText(item: WardrobeItem): string {
   return `${item.name} ${item.category} ${JSON.stringify(item.ai_attributes || {})}`.toLowerCase();
+}
+
+function itemSeasons(item: WardrobeItem): string[] {
+  const attributes = item.ai_attributes || {};
+  const seasons = Array.isArray(attributes.season) ? attributes.season : [];
+  return seasons.map(season => season.toLowerCase());
+}
+
+function isTooWarmForSummer(item: WardrobeItem): boolean {
+  const text = itemSearchText(item);
+  const attributes = item.ai_attributes || {};
+  return /hoodie|sweatshirt|fleece|puffer|parka|heavy coat|winter coat|thermal|thick knit|wool coat/i.test(text) ||
+    attributes.weight === 'heavy' || attributes.warmth === 'warm';
+}
+
+function isTooLightForWinter(item: WardrobeItem): boolean {
+  const text = itemSearchText(item);
+  const attributes = item.ai_attributes || {};
+  return /swimwear|bikini|tank top|vest top|shorts|sandals|beachwear/i.test(text) ||
+    attributes.weight === 'light' && attributes.warmth === 'cool';
+}
+
+function isSeasonCompatible(item: WardrobeItem, request: string): boolean {
+  const season = requestedSeason(request);
+  if (!season) return true;
+  const seasons = itemSeasons(item);
+  if (season === 'summer') {
+    return !isTooWarmForSummer(item) && (!seasons.length || seasons.includes('summer') || seasons.includes('spring') || seasons.includes('all-season'));
+  }
+  if (season === 'winter') {
+    return !isTooLightForWinter(item) && (!seasons.length || seasons.includes('winter') || seasons.includes('autumn') || seasons.includes('all-season'));
+  }
+  return !seasons.length || seasons.includes(season) || seasons.includes('all-season');
+}
+
+function seasonEligibleItems(items: WardrobeItem[], request: string): WardrobeItem[] {
+  return items.filter(item => isSeasonCompatible(item, request));
+}
+
+function itemColors(item: WardrobeItem): string[] {
+  const attributes = item.ai_attributes || {};
+  const values = Array.isArray(attributes.colors) ? attributes.colors : attributes.color ? [attributes.color] : [];
+  return values.map(color => color.toLowerCase());
+}
+
+function colorPairScore(first: WardrobeItem, second: WardrobeItem): number {
+  const firstColors = itemColors(first);
+  const secondColors = itemColors(second);
+  if (!firstColors.length || !secondColors.length) return 60;
+  if (firstColors.some(color => secondColors.includes(color))) return 78;
+  if (firstColors.some(color => ['black', 'white', 'grey', 'gray', 'beige', 'cream', 'navy'].includes(color)) ||
+      secondColors.some(color => ['black', 'white', 'grey', 'gray', 'beige', 'cream', 'navy'].includes(color))) return 86;
+  const harmonious: Record<string, string[]> = {
+    blue: ['orange', 'brown', 'beige', 'white'], red: ['green', 'blue', 'black', 'white'],
+    green: ['red', 'brown', 'beige', 'white'], yellow: ['purple', 'blue', 'black'],
+    purple: ['yellow', 'white', 'beige'], orange: ['blue', 'white', 'beige'],
+    brown: ['blue', 'green', 'white', 'beige'], pink: ['grey', 'gray', 'white', 'navy']
+  };
+  if (firstColors.some(color => harmonious[color]?.some(match => secondColors.includes(match))) ||
+      secondColors.some(color => harmonious[color]?.some(match => firstColors.includes(match)))) return 82;
+  return 48;
+}
+
+function pairCompatibility(first: WardrobeItem, second: WardrobeItem, request: string): PairCompatibility {
+  let score = colorPairScore(first, second);
+  const firstText = itemSearchText(first);
+  const secondText = itemSearchText(second);
+  const firstStyle = String(first.ai_attributes?.style || '').toLowerCase();
+  const secondStyle = String(second.ai_attributes?.style || '').toLowerCase();
+  if (firstStyle && secondStyle && firstStyle.split(/[, ]+/).some(style => secondStyle.includes(style))) score += 8;
+  if (requestedSeason(request) && isSeasonCompatible(first, request) && isSeasonCompatible(second, request)) score += 7;
+  if (isFormalRequest(request) && (isTooCasualForFormal(first) || isTooCasualForFormal(second))) score -= 35;
+  if (/summer|hot weather|beach|صيف/i.test(request) && (isTooWarmForSummer(first) || isTooWarmForSummer(second))) score -= 45;
+  if (/hoodie|sweatshirt/i.test(firstText) && /blazer|formal|dress shoe/i.test(secondText)) score -= 12;
+  const finalScore = Math.max(0, Math.min(100, Math.round(score)));
+  const reason = finalScore >= 80 ? 'Strong color and style harmony.' : finalScore >= 65 ? 'Works together with a balanced contrast.' : 'Weak match; choose another piece if available.';
+  return { firstItemId: first.id, secondItemId: second.id, firstItemName: first.name, secondItemName: second.name, score: finalScore, reason };
+}
+
+function compatibilityFor(items: WardrobeItem[], request: string): { overallScore: number; compatibility: PairCompatibility[] } {
+  const pairs: PairCompatibility[] = [];
+  for (let first = 0; first < items.length; first += 1) {
+    for (let second = first + 1; second < items.length; second += 1) {
+      pairs.push(pairCompatibility(items[first], items[second], request));
+    }
+  }
+  const overallScore = pairs.length ? Math.round(pairs.reduce((sum, pair) => sum + pair.score, 0) / pairs.length) : 100;
+  return { overallScore, compatibility: pairs };
+}
+
+export function scoreOutfitCompatibility(items: WardrobeItem[], request: string): { overallScore: number; compatibility: PairCompatibility[] } {
+  return compatibilityFor(items, request);
+}
+
+function noSeasonOutfitResponse(items: WardrobeItem[], request: string): ChatResponse | null {
+  const season = requestedSeason(request);
+  if (!season) return null;
+  const eligible = seasonEligibleItems(items, request);
+  const slots = new Set(eligible.map(getSlot));
+  if (slots.has('dress') || (slots.has('top') && slots.has('bottom'))) return null;
+  const missing: string[] = [];
+  if (!slots.has('dress') && !slots.has('top')) missing.push('a suitable top');
+  if (!slots.has('dress') && !slots.has('bottom')) missing.push('a suitable bottom');
+  const unsuitable = items.filter(item => !eligible.includes(item)).map(item => item.name);
+  return {
+    message: `I could not build a complete ${season} outfit from your wardrobe. You are missing ${missing.join(' and ')}.\n\n${unsuitable.length ? `These pieces were not used because they are not suitable for ${season}: ${unsuitable.join(', ')}.` : ''}`,
+    alerts: [`No complete ${season} outfit was found from the available wardrobe.`]
+  };
 }
 
 function isTooCasualForFormal(item: WardrobeItem): boolean {
@@ -103,6 +286,10 @@ function isTooCasualForFormal(item: WardrobeItem): boolean {
 
 function fitsRequestedOccasion(items: WardrobeItem[], request: string): boolean {
   return !isFormalRequest(request) || !items.some(isTooCasualForFormal);
+}
+
+function fitsRequestedSeason(items: WardrobeItem[], request: string): boolean {
+  return items.every(item => isSeasonCompatible(item, request));
 }
 
 function requestAwareScore(item: WardrobeItem, request: string): number {
@@ -117,6 +304,14 @@ function requestAwareScore(item: WardrobeItem, request: string): number {
     if (/jeans|denim|sweatpants|sweat pants|jogger|joggers|sweatshirt|hoodie|t-shirt|sneaker/i.test(text)) score += 14;
     if (/classic trouser|formal trouser|tailored trouser|dress pant|dress pants|blazer|oxford|loafer/i.test(text)) score -= 6;
   }
+  if (requestedSeason(request) === 'summer') {
+    if (/linen|cotton|light|breathable|airy|shorts|skirt|dress|sandals|t-shirt|shirt/i.test(text)) score += 12;
+    if (isTooWarmForSummer(item)) score -= 40;
+  }
+  if (requestedSeason(request) === 'winter') {
+    if (/wool|fleece|knit|coat|jacket|hoodie|boot|warm|thermal/i.test(text)) score += 12;
+    if (isTooLightForWinter(item)) score -= 30;
+  }
   return score;
 }
 
@@ -126,12 +321,13 @@ function outfitDecisionScore(items: WardrobeItem[], request: string): number {
   if (slots.has('dress') || (slots.has('top') && slots.has('bottom'))) score += 8;
   if (slots.has('shoes')) score += 4;
   if (isFormalRequest(request) && slots.has('jacket')) score += 3;
+  score += Math.round(compatibilityFor(items, request).overallScore / 10);
   return score;
 }
 
 function chooseForRequest(items: WardrobeItem[], request: string): WardrobeItem | undefined {
   return [...items]
-    .filter(item => !isFormalRequest(request) || !isTooCasualForFormal(item))
+    .filter(item => (!isFormalRequest(request) || !isTooCasualForFormal(item)) && isSeasonCompatible(item, request))
     .sort((a, b) => requestAwareScore(b, request) - requestAwareScore(a, request))[0];
 }
 
@@ -223,6 +419,7 @@ Inspect every wardrobe image below. The text index is authoritative for IDs:
 ${wardrobeIndex}
 
 Create exactly THREE distinct, high-quality outfits from the user's actual wardrobe. Analyze color harmony, patterns, fabric, silhouette, proportions, layering, footwear, accessories, season, occasion, and the user's request.
+Hard season rule: for summer, hot weather, beach, or صيف, never select hoodies, sweatshirts, fleece, puffer jackets, thermal clothing, thick knitwear, wool coats, or other heavy warm pieces. For winter, do not select swimwear, beachwear, or clearly lightweight summer-only pieces. If the wardrobe cannot make a valid outfit for the requested season, return no outfits and explain exactly what is missing.
 Rules: use only indexed IDs; never invent clothing; each look needs a dress OR at least a top and bottom; add optional pieces only when they improve the look; make all three looks meaningfully different; obey any requested color, garment, occasion, or season; rank 1 strongest, 2 best alternative, 3 most creative wearable option. Formal decision rule: when the request includes formal, office, business, interview, wedding, elegant, dressy, or professional, prioritize chemise/shirts, blazers, tailored trousers or skirts, dresses, loafers, heels, or dress shoes. Reject sweatshirts, hoodies, T-shirts, joggers, sportswear, and sneakers unless the user explicitly asks for them. Do not call a sweatshirt formal just because its color matches. Casual decision rule: when the request includes casual, relaxed, everyday, or weekend, prefer jeans/denim, sweatpants, joggers, casual sneakers, hoodies, and relaxed tops over classic trousers, tailored pants, dress shoes, or blazers.
 Category safety: compare every image with its declared category. If an image is trousers/pants but declared as Accessories, it is invalid and must not be used at all. If an image is clothing but declared as Bags, it is invalid and must not be used at all. Do not reinterpret a mismatched item as an accessory. Add the ID to invalid_item_ids and explain the mismatch in alerts. Only use category-compatible items in outfits.
 Evaluate every valid item declared as Accessories or Bags separately. Rings, belts, scarves, bags, and similar pieces must appear in accessory_notes even when not needed in the core outfit. Give each a realistic 0-100 fit_score, verdict, and reason. Never omit a valid accessory without evaluating it.
@@ -253,9 +450,9 @@ Return ONLY valid JSON: {"intro":"one short expert overview","alerts":["category
       if (!ids.length || seen.has(signature)) return null;
       seen.add(signature);
       const selectedItems = ids.map(id => wardrobeItems.find(item => item.id === id)).filter((item): item is WardrobeItem => Boolean(item));
-      if (!isStructurallyValidOutfit(selectedItems) || !fitsRequestedOccasion(selectedItems, userRequest)) return null;
+      if (!isStructurallyValidOutfit(selectedItems) || !fitsRequestedOccasion(selectedItems, userRequest) || !fitsRequestedSeason(selectedItems, userRequest)) return null;
       const missing = outfit.missing?.length ? `\nMissing: ${outfit.missing.join(', ')}` : '';
-      return { items: selectedItems, reason: `${outfit.title}: ${outfit.reason}${missing}` };
+      return makeOutfitSuggestion(selectedItems, `${outfit.title}: ${outfit.reason}${missing}`, userRequest);
     }).filter((outfit: OutfitSuggestion | null): outfit is OutfitSuggestion => Boolean(outfit))
       .sort((a: OutfitSuggestion, b: OutfitSuggestion) => outfitDecisionScore(b.items, userRequest) - outfitDecisionScore(a.items, userRequest))
       .slice(0, 3);
@@ -275,6 +472,11 @@ function isStructurallyValidOutfit(items: WardrobeItem[]): boolean {
   return slots.has('dress') || (slots.has('top') && slots.has('bottom'));
 }
 
+function makeOutfitSuggestion(items: WardrobeItem[], reason: string, request: string): OutfitSuggestion {
+  const scores = scoreOutfitCompatibility(items, request);
+  return { items, reason, overallScore: scores.overallScore, compatibility: scores.compatibility };
+}
+
 async function requestSecureStylist(
   userRequest: string,
   wardrobeItems: WardrobeItem[],
@@ -289,8 +491,8 @@ async function requestSecureStylist(
     const invalidIds = new Set<string>(Array.isArray(data.invalid_item_ids) ? data.invalid_item_ids : []);
     const suggestions = data.outfits.map((outfit: { title?: string; item_ids?: string[]; reason?: string }) => {
       const items = [...new Set(outfit.item_ids || [])].filter(id => !invalidIds.has(id)).map(id => validItems.get(id)).filter(Boolean) as WardrobeItem[];
-      return isStructurallyValidOutfit(items) && fitsRequestedOccasion(items, userRequest)
-        ? { items, reason: `${outfit.title || 'Look'}: ${outfit.reason || ''}` }
+      return isStructurallyValidOutfit(items) && fitsRequestedOccasion(items, userRequest) && fitsRequestedSeason(items, userRequest)
+        ? makeOutfitSuggestion(items, `${outfit.title || 'Look'}: ${outfit.reason || ''}`, userRequest)
         : null;
     }).filter((outfit: OutfitSuggestion | null): outfit is OutfitSuggestion => Boolean(outfit))
       .sort((a: OutfitSuggestion, b: OutfitSuggestion) => outfitDecisionScore(b.items, userRequest) - outfitDecisionScore(a.items, userRequest))
@@ -547,7 +749,7 @@ CRITICAL RULES — READ CAREFULLY:
    - "casual outfit" → pick casual-looking top + bottom
    - "party outfit" → pick most elegant/dressy items
    - "formal/work" → pick structured, professional items
-   - "summer look" → pick light, bright, airy items
+   - "summer look" → pick light, breathable, airy items; never force a hoodie or heavy warm item
 
 2. COLOR MATCH — when user specifies a color, THAT item is mandatory
    - Search descriptions for that color word
@@ -614,28 +816,47 @@ export async function chatWithStylist(
     return { message: "Your wardrobe is empty! 👗\n\nPlease add some items to your wardrobe first." };
   }
 
+  if (needsClarification(userMessage)) {
+    return clarificationResponse();
+  }
+
   const localAlerts = wardrobeItems.map(obviousCategoryMismatch).filter((alert): alert is string => Boolean(alert));
   const locallySafeItems = wardrobeItems.filter(item => !obviousCategoryMismatch(item));
   if (locallySafeItems.length === 0 && localAlerts.length > 0) {
     return { message: `I cannot build a safe outfit from these pieces.\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: localAlerts };
   }
 
-  const secureResult = await requestSecureStylist(userMessage, locallySafeItems);
+  const requiredResponse = requiredItemResponse(userMessage, locallySafeItems);
+  if (requiredResponse) {
+    return localAlerts.length
+      ? { ...requiredResponse, message: `${requiredResponse.message}\n\nWardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(requiredResponse.alerts || []), ...localAlerts] }
+      : requiredResponse;
+  }
+
+  const seasonResponse = noSeasonOutfitResponse(locallySafeItems, userMessage);
+  if (seasonResponse) {
+    return localAlerts.length
+      ? { ...seasonResponse, message: `${seasonResponse.message}\n\nWardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(seasonResponse.alerts || []), ...localAlerts] }
+      : seasonResponse;
+  }
+  const requestableItems = seasonEligibleItems(locallySafeItems, userMessage);
+
+  const secureResult = await requestSecureStylist(userMessage, requestableItems);
   if (secureResult) return localAlerts.length ? { ...secureResult, message: `${secureResult.message}\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(secureResult.alerts || []), ...localAlerts] } : secureResult;
 
-  const masterResult = await buildMasterOutfitsWithGemini(userMessage, locallySafeItems);
+  const masterResult = await buildMasterOutfitsWithGemini(userMessage, requestableItems);
   if (masterResult) return localAlerts.length ? { ...masterResult, message: `${masterResult.message}\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(masterResult.alerts || []), ...localAlerts] } : masterResult;
 
   // ── Step 1: Visually describe every item with AI vision ───────────────────
   console.log('\nDescribing all items with AI vision...');
   const describedItems: { id: string; slot: string; name: string; desc: string }[] = [];
 
-  for (let i = 0; i < wardrobeItems.length; i++) {
-    const item = wardrobeItems[i];
+  for (let i = 0; i < requestableItems.length; i++) {
+    const item = requestableItems[i];
     console.log(`  [${i + 1}/${wardrobeItems.length}] Analyzing: ${item.name} (${item.category})`);
     const desc = await describeItem(item);
     describedItems.push({ id: item.id, slot: getSlot(item), name: item.name, desc });
-    if (i < wardrobeItems.length - 1) await new Promise(r => setTimeout(r, 300));
+    if (i < requestableItems.length - 1) await new Promise(r => setTimeout(r, 300));
   }
 
   console.log('\n✅ All items described:');
@@ -669,12 +890,12 @@ export async function chatWithStylist(
   for (const [slot, id] of Object.entries(finalPicks)) {
     if (!id || id === 'null') continue;
     if (hasDress && (slot === 'top' || slot === 'bottom')) continue;
-    const item = wardrobeItems.find(w => w.id === id);
+    const item = requestableItems.find(w => w.id === id);
     if (item) pickedItems.push(item);
   }
 
-  if (pickedItems.length === 0 || !fitsRequestedOccasion(pickedItems, userMessage)) {
-    return ruleFallback(userMessage, locallySafeItems, forcedPicks, describedItems);
+  if (pickedItems.length === 0 || !fitsRequestedOccasion(pickedItems, userMessage) || !fitsRequestedSeason(pickedItems, userMessage)) {
+    return ruleFallback(userMessage, requestableItems, forcedPicks, describedItems);
   }
 
   // ── Step 6: Build final message ───────────────────────────────────────────
@@ -696,7 +917,7 @@ export async function chatWithStylist(
 
   return {
     message: `${result.message}\n\n${itemLines}${missingNote}`,
-    outfitSuggestions: [{ items: pickedItems, reason: result.message }],
+    outfitSuggestions: [makeOutfitSuggestion(pickedItems, result.message, userMessage)],
     alerts: localAlerts.length ? localAlerts : undefined,
   };
 }
@@ -764,6 +985,6 @@ function ruleFallback(
 
   return {
     message: `Here's my outfit suggestion for you! 👗✨\n\n${itemLines}${missingNote}`,
-    outfitSuggestions: [{ items: picked, reason: `${occasionNote}Best match for: ${request}` }]
+    outfitSuggestions: [makeOutfitSuggestion(picked, `${occasionNote}Best match for: ${request}`, request)]
   };
 }
