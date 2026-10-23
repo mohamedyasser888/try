@@ -212,25 +212,42 @@ function seasonEligibleItems(items: WardrobeItem[], request: string): WardrobeIt
 function itemColors(item: WardrobeItem): string[] {
   const attributes = item.ai_attributes || {};
   const values = Array.isArray(attributes.colors) ? attributes.colors : attributes.color ? [attributes.color] : [];
-  return values.map(color => color.toLowerCase());
+  const text = `${item.name} ${attributes.description || ''}`.toLowerCase();
+  const aliases: Record<string, string> = {
+    navy: 'navy', 'dark blue': 'blue', 'light blue': 'blue', denim: 'blue',
+    burgundy: 'red', maroon: 'red', wine: 'red', olive: 'green', khaki: 'beige',
+    tan: 'beige', nude: 'beige', offwhite: 'white', 'off-white': 'white',
+    charcoal: 'grey', gray: 'grey', silver: 'grey', gold: 'yellow'
+  };
+  const normalized = values
+    .flatMap(color => String(color).toLowerCase().split(/[,/&]+/))
+    .map(color => aliases[color.trim()] || color.trim())
+    .filter(Boolean);
+  const knownColors = ['black', 'white', 'grey', 'gray', 'beige', 'cream', 'navy', 'blue', 'red', 'green', 'yellow', 'purple', 'orange', 'pink', 'brown'];
+  for (const color of knownColors) {
+    if (text.includes(color) && !normalized.includes(color === 'gray' ? 'grey' : color)) normalized.push(color === 'gray' ? 'grey' : color);
+  }
+  return [...new Set(normalized)];
 }
 
 function colorPairScore(first: WardrobeItem, second: WardrobeItem): number {
   const firstColors = itemColors(first);
   const secondColors = itemColors(second);
-  if (!firstColors.length || !secondColors.length) return 60;
-  if (firstColors.some(color => secondColors.includes(color))) return 78;
-  if (firstColors.some(color => ['black', 'white', 'grey', 'gray', 'beige', 'cream', 'navy'].includes(color)) ||
-      secondColors.some(color => ['black', 'white', 'grey', 'gray', 'beige', 'cream', 'navy'].includes(color))) return 86;
+  if (!firstColors.length || !secondColors.length) return 52;
+  const neutrals = ['black', 'white', 'grey', 'gray', 'beige', 'cream', 'navy', 'brown'];
+  const firstNeutral = firstColors.some(color => neutrals.includes(color));
+  const secondNeutral = secondColors.some(color => neutrals.includes(color));
+  if (firstColors.some(color => secondColors.includes(color))) return 74;
+  if (firstNeutral && secondNeutral) return 78;
+  if (firstNeutral || secondNeutral) return 88;
   const harmonious: Record<string, string[]> = {
-    blue: ['orange', 'brown', 'beige', 'white'], red: ['green', 'blue', 'black', 'white'],
-    green: ['red', 'brown', 'beige', 'white'], yellow: ['purple', 'blue', 'black'],
-    purple: ['yellow', 'white', 'beige'], orange: ['blue', 'white', 'beige'],
-    brown: ['blue', 'green', 'white', 'beige'], pink: ['grey', 'gray', 'white', 'navy']
+    blue: ['orange', 'brown', 'beige'], red: ['blue', 'green'],
+    green: ['red', 'brown'], yellow: ['purple', 'blue'],
+    purple: ['yellow'], orange: ['blue'], pink: ['green', 'blue']
   };
   if (firstColors.some(color => harmonious[color]?.some(match => secondColors.includes(match))) ||
-      secondColors.some(color => harmonious[color]?.some(match => firstColors.includes(match)))) return 82;
-  return 48;
+      secondColors.some(color => harmonious[color]?.some(match => firstColors.includes(match)))) return 80;
+  return 30;
 }
 
 function pairCompatibility(first: WardrobeItem, second: WardrobeItem, request: string): PairCompatibility {
@@ -245,7 +262,15 @@ function pairCompatibility(first: WardrobeItem, second: WardrobeItem, request: s
   if (/summer|hot weather|beach|صيف/i.test(request) && (isTooWarmForSummer(first) || isTooWarmForSummer(second))) score -= 45;
   if (/hoodie|sweatshirt/i.test(firstText) && /blazer|formal|dress shoe/i.test(secondText)) score -= 12;
   const finalScore = Math.max(0, Math.min(100, Math.round(score)));
-  const reason = finalScore >= 80 ? 'Strong color and style harmony.' : finalScore >= 65 ? 'Works together with a balanced contrast.' : 'Weak match; choose another piece if available.';
+  const colorsKnown = itemColors(first).length > 0 && itemColors(second).length > 0;
+  const colorScore = colorPairScore(first, second);
+  const reason = !colorsKnown
+    ? 'Color data is incomplete, so this pairing has lower confidence.'
+    : colorScore >= 80
+      ? 'Strong color harmony with a balanced contrast.'
+      : colorScore >= 65
+        ? 'Acceptable color relationship, supported by the item styles.'
+        : 'Weak color relationship; this pair should not be forced when another option exists.';
   return { firstItemId: first.id, secondItemId: second.id, firstItemName: first.name, secondItemName: second.name, score: finalScore, reason };
 }
 
@@ -262,6 +287,36 @@ function compatibilityFor(items: WardrobeItem[], request: string): { overallScor
 
 export function scoreOutfitCompatibility(items: WardrobeItem[], request: string): { overallScore: number; compatibility: PairCompatibility[] } {
   return compatibilityFor(items, request);
+}
+
+function outfitQuality(items: WardrobeItem[], request: string): { ok: boolean; reason: string } {
+  const scores = compatibilityFor(items, request);
+  const corePairs = scores.compatibility.filter(pair => {
+    const first = items.find(item => item.id === pair.firstItemId);
+    const second = items.find(item => item.id === pair.secondItemId);
+    return Boolean(first && second && !['accessories', 'bag'].includes(getSlot(first)) && !['accessories', 'bag'].includes(getSlot(second)));
+  });
+  if (corePairs.some(pair => pair.score < 42)) {
+    const weak = corePairs.filter(pair => pair.score < 42).map(pair => `${pair.firstItemName} + ${pair.secondItemName}`).join(', ');
+    return { ok: false, reason: `I did not force this look because the color pairing is too weak: ${weak}.` };
+  }
+  if (scores.overallScore < 58) {
+    return { ok: false, reason: `I did not force this look because its overall compatibility is only ${scores.overallScore}%.` };
+  }
+  return { ok: true, reason: '' };
+}
+
+function wardrobeLimitations(items: WardrobeItem[], request: string): string {
+  const slots = new Set(seasonEligibleItems(items, request).map(getSlot));
+  const missing: string[] = [];
+  if (!slots.has('dress') && !slots.has('top')) missing.push('a suitable top');
+  if (!slots.has('dress') && !slots.has('bottom')) missing.push('a suitable bottom');
+  if (!slots.has('shoes')) missing.push('shoes');
+  const incomplete = items.filter(item => !itemColors(item).length).map(item => item.name).slice(0, 4);
+  const dataNote = incomplete.length
+    ? ` Color information is incomplete for ${incomplete.join(', ')}, so the confidence score is limited.`
+    : '';
+  return `${missing.length ? `The wardrobe is missing ${missing.join(', ')}.` : 'The wardrobe has the basic clothing slots, but no pair passed the compatibility check.'}${dataNote}`;
 }
 
 function noSeasonOutfitResponse(items: WardrobeItem[], request: string): ChatResponse | null {
@@ -329,6 +384,26 @@ function chooseForRequest(items: WardrobeItem[], request: string): WardrobeItem 
   return [...items]
     .filter(item => (!isFormalRequest(request) || !isTooCasualForFormal(item)) && isSeasonCompatible(item, request))
     .sort((a, b) => requestAwareScore(b, request) - requestAwareScore(a, request))[0];
+}
+
+function chooseBestCorePair(
+  tops: WardrobeItem[],
+  bottoms: WardrobeItem[],
+  request: string,
+): { top: WardrobeItem; bottom: WardrobeItem } | null {
+  const candidates: Array<{ top: WardrobeItem; bottom: WardrobeItem; score: number }> = [];
+  for (const top of tops) {
+    for (const bottom of bottoms) {
+      if (isFormalRequest(request) && (isTooCasualForFormal(top) || isTooCasualForFormal(bottom))) continue;
+      if (!isSeasonCompatible(top, request) || !isSeasonCompatible(bottom, request)) continue;
+      const pair = pairCompatibility(top, bottom, request);
+      candidates.push({ top, bottom, score: pair.score + requestAwareScore(top, request) + requestAwareScore(bottom, request) });
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0];
+  if (!best || colorPairScore(best.top, best.bottom) < 55) return null;
+  return { top: best.top, bottom: best.bottom };
 }
 
 // ─── Convert image URL to base64 ─────────────────────────────────────────────
@@ -451,6 +526,8 @@ Return ONLY valid JSON: {"intro":"one short expert overview","alerts":["category
       seen.add(signature);
       const selectedItems = ids.map(id => wardrobeItems.find(item => item.id === id)).filter((item): item is WardrobeItem => Boolean(item));
       if (!isStructurallyValidOutfit(selectedItems) || !fitsRequestedOccasion(selectedItems, userRequest) || !fitsRequestedSeason(selectedItems, userRequest)) return null;
+      const quality = outfitQuality(selectedItems, userRequest);
+      if (!quality.ok) return null;
       const missing = outfit.missing?.length ? `\nMissing: ${outfit.missing.join(', ')}` : '';
       return makeOutfitSuggestion(selectedItems, `${outfit.title}: ${outfit.reason}${missing}`, userRequest);
     }).filter((outfit: OutfitSuggestion | null): outfit is OutfitSuggestion => Boolean(outfit))
@@ -460,7 +537,9 @@ Return ONLY valid JSON: {"intro":"one short expert overview","alerts":["category
     if (!suggestions.length && parsed.alerts?.length) {
       return { message: `I could not build a safe outfit from the available pieces.${alertText}${formatAccessoryNotes(parsed.accessory_notes, validIds)}`, alerts: parsed.alerts };
     }
-    return suggestions.length ? { message: `${parsed.intro || 'Here are my three strongest looks for you.'}${alertText}${formatAccessoryNotes(parsed.accessory_notes, validIds)}`, outfitSuggestions: suggestions, alerts: parsed.alerts } : null;
+    return suggestions.length
+      ? { message: `${parsed.intro || 'Here are my three strongest looks for you.'}${alertText}${formatAccessoryNotes(parsed.accessory_notes, validIds)}`, outfitSuggestions: suggestions, alerts: parsed.alerts }
+      : { message: `I could not find a color-safe outfit to recommend from the available pieces. ${wardrobeLimitations(wardrobeItems, userRequest)}${alertText}`, alerts: [...(parsed.alerts || []), 'No outfit passed the compatibility quality check.'] };
   } catch (error) {
     console.warn('Master stylist request failed:', error);
     return null;
@@ -491,7 +570,7 @@ async function requestSecureStylist(
     const invalidIds = new Set<string>(Array.isArray(data.invalid_item_ids) ? data.invalid_item_ids : []);
     const suggestions = data.outfits.map((outfit: { title?: string; item_ids?: string[]; reason?: string }) => {
       const items = [...new Set(outfit.item_ids || [])].filter(id => !invalidIds.has(id)).map(id => validItems.get(id)).filter(Boolean) as WardrobeItem[];
-      return isStructurallyValidOutfit(items) && fitsRequestedOccasion(items, userRequest) && fitsRequestedSeason(items, userRequest)
+      return isStructurallyValidOutfit(items) && fitsRequestedOccasion(items, userRequest) && fitsRequestedSeason(items, userRequest) && outfitQuality(items, userRequest).ok
         ? makeOutfitSuggestion(items, `${outfit.title || 'Look'}: ${outfit.reason || ''}`, userRequest)
         : null;
     }).filter((outfit: OutfitSuggestion | null): outfit is OutfitSuggestion => Boolean(outfit))
@@ -501,7 +580,9 @@ async function requestSecureStylist(
     if (!suggestions.length && alertText) {
       return { message: `I could not build a safe outfit from the available pieces.${alertText}${formatAccessoryNotes(data.accessory_notes, new Set(validItems.keys()))}`, alerts: data.alerts };
     }
-    return suggestions.length ? { message: `${data.intro || 'Here are my strongest looks for you.'}${alertText}${formatAccessoryNotes(data.accessory_notes, new Set(validItems.keys()))}`, outfitSuggestions: suggestions, alerts: data.alerts } : null;
+    return suggestions.length
+      ? { message: `${data.intro || 'Here are my strongest looks for you.'}${alertText}${formatAccessoryNotes(data.accessory_notes, new Set(validItems.keys()))}`, outfitSuggestions: suggestions, alerts: data.alerts }
+      : { message: `I could not find a color-safe outfit to recommend from the available pieces. ${wardrobeLimitations(wardrobeItems, userRequest)}${alertText}`, alerts: [...(data.alerts || []), 'No outfit passed the compatibility quality check.'] };
   } catch {
     return null;
   }
@@ -894,7 +975,7 @@ export async function chatWithStylist(
     if (item) pickedItems.push(item);
   }
 
-  if (pickedItems.length === 0 || !fitsRequestedOccasion(pickedItems, userMessage) || !fitsRequestedSeason(pickedItems, userMessage)) {
+  if (pickedItems.length === 0 || !fitsRequestedOccasion(pickedItems, userMessage) || !fitsRequestedSeason(pickedItems, userMessage) || !outfitQuality(pickedItems, userMessage).ok) {
     return ruleFallback(userMessage, requestableItems, forcedPicks, describedItems);
   }
 
@@ -948,10 +1029,14 @@ function ruleFallback(
     const dress = chooseForRequest(bySlot.dress, request);
     if (dress) picked.push(dress);
   } else {
-    const top = chooseForRequest(bySlot.top || [], request);
-    const bottom = chooseForRequest(bySlot.bottom || [], request);
-    if (top) picked.push(top); else missing.push('top');
-    if (bottom) picked.push(bottom); else missing.push('bottom');
+    const pair = chooseBestCorePair(bySlot.top || [], bySlot.bottom || [], request);
+    if (pair) {
+      picked.push(pair.top, pair.bottom);
+    } else {
+      if (!bySlot.top?.length) missing.push('top');
+      if (!bySlot.bottom?.length) missing.push('bottom');
+      if (bySlot.top?.length && bySlot.bottom?.length) missing.push('a color-compatible top and bottom pairing');
+    }
   }
 
   const jacket = chooseForRequest(bySlot.jacket || [], request);
@@ -963,9 +1048,9 @@ function ruleFallback(
   // Do not guess with optional accessories in the fallback. A misplaced
   // garment must never be silently presented as an accessory.
 
-  if (picked.length === 0) {
+  if (picked.length === 0 || !isStructurallyValidOutfit(picked) || !outfitQuality(picked, request).ok) {
     return {
-      message: `I couldn't build an outfit. You have:\n${items.map(i => `• ${i.name} (${i.category})`).join('\n')}`
+      message: `I will not force an outfit from these pieces because the available combination is not color-safe or complete.\n\n${wardrobeLimitations(items, request)}${missing.length ? `\n\nStill needed: ${missing.join(', ')}.` : ''}`
     };
   }
 
@@ -984,7 +1069,7 @@ function ruleFallback(
     : '';
 
   return {
-    message: `Here's my outfit suggestion for you! 👗✨\n\n${itemLines}${missingNote}`,
-    outfitSuggestions: [makeOutfitSuggestion(picked, `${occasionNote}Best match for: ${request}`, request)]
+    message: `I found the strongest color-safe look available in your wardrobe. 👗✨\n\n${itemLines}${missingNote}${occasionNote}\n\nWhy this works: the pieces were selected as a pair, then checked for color harmony, season, occasion, and category compatibility.`,
+    outfitSuggestions: [makeOutfitSuggestion(picked, `${occasionNote}The pieces were selected together rather than independently, with color harmony and the requested context checked first.`, request)]
   };
 }
