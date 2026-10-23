@@ -317,7 +317,17 @@ function wardrobeLimitations(items: WardrobeItem[], request: string): string {
   const dataNote = incomplete.length
     ? ` Color information is incomplete for ${incomplete.join(', ')}, so the confidence score is limited.`
     : '';
-  return `${missing.length ? `The wardrobe is missing ${missing.join(', ')}.` : 'The wardrobe has the basic clothing slots, but no pair passed the compatibility check.'}${dataNote}`;
+  return `${missing.length ? `The wardrobe is missing ${missing.join(', ')}.` : 'The wardrobe has the basic clothing slots, but no pair passed the compatibility check.'}${dataNote}${topBottomCompatibilityReport(items, request)}`;
+}
+
+function topBottomCompatibilityReport(items: WardrobeItem[], request: string): string {
+  const tops = items.filter(item => getSlot(item) === 'top' && isSeasonCompatible(item, request) && (!isFormalRequest(request) || !isTooCasualForFormal(item)));
+  const bottoms = items.filter(item => getSlot(item) === 'bottom' && isSeasonCompatible(item, request) && (!isFormalRequest(request) || !isTooCasualForFormal(item)));
+  if (!tops.length || !bottoms.length) return '';
+  const comparisons = tops.flatMap(top => bottoms.map(bottom => pairCompatibility(top, bottom, request)))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
+  return `\n\nTop + bottom comparison:\n${comparisons.map(pair => `• ${pair.firstItemName} + ${pair.secondItemName}: ${pair.score}% — ${pair.reason}`).join('\n')}`;
 }
 
 function noSeasonOutfitResponse(items: WardrobeItem[], request: string): ChatResponse | null {
@@ -405,6 +415,23 @@ function chooseBestCorePair(
   const best = candidates[0];
   if (!best || colorPairScore(best.top, best.bottom) < 55) return null;
   return { top: best.top, bottom: best.bottom };
+}
+
+function addCorePairRecommendation(response: ChatResponse, items: WardrobeItem[], request: string): ChatResponse {
+  if (response.outfitSuggestions?.length) return response;
+  const tops = items.filter(item => getSlot(item) === 'top');
+  const bottoms = items.filter(item => getSlot(item) === 'bottom');
+  const pair = chooseBestCorePair(tops, bottoms, request);
+  if (!pair) return response;
+  const coreItems = [pair.top, pair.bottom];
+  const quality = outfitQuality(coreItems, request);
+  if (!quality.ok) return response;
+  const scores = scoreOutfitCompatibility(coreItems, request);
+  return {
+    ...response,
+    message: `${response.message}\n\nI can still recommend a strong core outfit: ${pair.top.name} with ${pair.bottom.name}. Shoes and accessories are optional finishing pieces and are not required to make this top-and-bottom pairing work.`,
+    outfitSuggestions: [makeOutfitSuggestion(coreItems, `Core outfit: ${pair.top.name} and ${pair.bottom.name} work together at ${scores.overallScore}% compatibility. ${scores.compatibility[0]?.reason || 'The pairing passed the color and context checks.'}`, request)]
+  };
 }
 
 // ─── Convert image URL to base64 ─────────────────────────────────────────────
@@ -924,10 +951,16 @@ export async function chatWithStylist(
   const requestableItems = seasonEligibleItems(locallySafeItems, userMessage);
 
   const secureResult = await requestSecureStylist(userMessage, requestableItems);
-  if (secureResult) return localAlerts.length ? { ...secureResult, message: `${secureResult.message}\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(secureResult.alerts || []), ...localAlerts] } : secureResult;
+  if (secureResult) {
+    const enriched = addCorePairRecommendation(secureResult, requestableItems, userMessage);
+    return localAlerts.length ? { ...enriched, message: `${enriched.message}\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(enriched.alerts || []), ...localAlerts] } : enriched;
+  }
 
   const masterResult = await buildMasterOutfitsWithGemini(userMessage, requestableItems);
-  if (masterResult) return localAlerts.length ? { ...masterResult, message: `${masterResult.message}\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(masterResult.alerts || []), ...localAlerts] } : masterResult;
+  if (masterResult) {
+    const enriched = addCorePairRecommendation(masterResult, requestableItems, userMessage);
+    return localAlerts.length ? { ...enriched, message: `${enriched.message}\n\n⚠️ Wardrobe check:\n${localAlerts.map(alert => `• ${alert}`).join('\n')}`, alerts: [...(enriched.alerts || []), ...localAlerts] } : enriched;
+  }
 
   // ── Step 1: Visually describe every item with AI vision ───────────────────
   console.log('\nDescribing all items with AI vision...');
